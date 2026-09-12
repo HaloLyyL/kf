@@ -6,11 +6,19 @@ import { api } from '../../lib/api';
 import { playNotificationSound, notifyNewMessage, showDesktopNotification, requestNotificationPermission } from '../../lib/notification';
 import type { Session, Message, Agent, Toast, AgentStatus, SessionTab, SidebarFilter } from './types';
 
+interface CurrentAgent {
+  id: string;
+  name: string;
+  avatar: string | null;
+}
+
 interface AgentState {
   sessions: Session[];
   agents: Agent[];
   currentSessionId: string | null;
   currentAgentId: string | null;
+  currentAgentName: string | null;
+  currentAgentAvatar: string | null;
   agentStatus: AgentStatus;
   toasts: Toast[];
   isUserInfoOpen: boolean;
@@ -44,29 +52,35 @@ type Action =
   | { type: 'SET_MESSAGE_STATUS'; payload: { sessionId: string; messageId: string; status: Message['status'] } }
   | { type: 'SYNC_SESSIONS'; payload: Session[] }
   | { type: 'UPDATE_AGENT_SESSIONS'; payload: Agent[] }
-  | { type: 'SET_CURRENT_AGENT_ID'; payload: string | null }
+  | { type: 'SET_CURRENT_AGENT_ID'; payload: CurrentAgent | null }
+  | { type: 'SET_PROFILE'; payload: { name: string; avatar: string | null } }
+  | { type: 'REMOVE_SESSION'; payload: string }
   | { type: 'UPSERT_SESSION'; payload: Session };
 
-function getCurrentAgentId(): string | null {
+function getCurrentAgent(): CurrentAgent | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = localStorage.getItem('currentUser');
+    const raw = sessionStorage.getItem('currentUser') || localStorage.getItem('currentUser');
     if (raw) {
       const u = JSON.parse(raw);
-      if (u.role === 'agent') return u.username || null;
+      if (u.role === 'agent' && u.username) {
+        return { id: u.username, name: u.displayName || u.username, avatar: u.avatar || null };
+      }
     }
   } catch { /* ignore */ }
   return null;
 }
 
-const currentAgentId = getCurrentAgentId();
+const currentAgent = getCurrentAgent();
 
 const initialState: AgentState = {
   sessions: [],
   agents: [],
   currentSessionId: null,
-  currentAgentId,
-  agentStatus: (typeof window !== 'undefined' && localStorage.getItem(`agent-status:${currentAgentId}`) as AgentStatus) || 'online',
+  currentAgentId: currentAgent?.id ?? null,
+  currentAgentName: currentAgent?.name ?? null,
+  currentAgentAvatar: currentAgent?.avatar ?? null,
+  agentStatus: (typeof window !== 'undefined' && localStorage.getItem(`agent-status:${currentAgent?.id}`) as AgentStatus) || 'online',
   toasts: [],
   isUserInfoOpen: false,
   isTransferOpen: false,
@@ -239,7 +253,46 @@ function agentReducer(state: AgentState, action: Action): AgentState {
       return { ...state, agents: action.payload };
     }
     case 'SET_CURRENT_AGENT_ID': {
-      return { ...state, currentAgentId: action.payload };
+      const agent = action.payload;
+      if (agent?.id === state.currentAgentId) {
+        return agent &&
+          (agent.name !== state.currentAgentName || agent.avatar !== state.currentAgentAvatar)
+          ? { ...state, currentAgentName: agent.name, currentAgentAvatar: agent.avatar }
+          : state;
+      }
+      const agentStatus =
+        (typeof window !== 'undefined' && agent && localStorage.getItem(`agent-status:${agent.id}`) as AgentStatus) || 'online';
+      return {
+        ...state,
+        currentAgentId: agent?.id ?? null,
+        currentAgentName: agent?.name ?? null,
+        currentAgentAvatar: agent?.avatar ?? null,
+        agentStatus,
+        sessions: [],
+        currentSessionId: null,
+      };
+    }
+    case 'SET_PROFILE': {
+      const { name, avatar } = action.payload;
+      if (typeof window !== 'undefined' && state.currentAgentId) {
+        try {
+          const raw = sessionStorage.getItem('currentUser') || localStorage.getItem('currentUser');
+          const u = raw ? JSON.parse(raw) : {};
+          const next = JSON.stringify({ ...u, username: state.currentAgentId, displayName: name, role: 'agent', avatar });
+          sessionStorage.setItem('currentUser', next);
+          localStorage.setItem('currentUser', next);
+        } catch { /* ignore */ }
+      }
+      return { ...state, currentAgentName: name, currentAgentAvatar: avatar };
+    }
+    case 'REMOVE_SESSION': {
+      const isCurrent = state.currentSessionId === action.payload;
+      return {
+        ...state,
+        sessions: state.sessions.filter((s) => s.id !== action.payload),
+        currentSessionId: isCurrent ? null : state.currentSessionId,
+        isMobileChatOpen: isCurrent ? false : state.isMobileChatOpen,
+      };
     }
     default:
       return state;
@@ -250,6 +303,7 @@ interface AgentContextValue {
   state: AgentState;
   dispatch: React.Dispatch<Action>;
   sendMessage: (sessionId: string, content: string, type?: 'text' | 'image') => void;
+  deleteSession: (sessionId: string) => void;
 }
 
 const AgentContext = createContext<AgentContextValue | null>(null);
@@ -268,18 +322,18 @@ export function AgentProvider({ children }: { children: ReactNode }) {
     socket.emit('agent:message', { sessionId, content, type });
   }, []);
 
-  // Detect login and update currentAgentId
+  const deleteSession = useCallback((sessionId: string) => {
+    socket.emit('session:delete', { sessionId });
+    dispatch({ type: 'REMOVE_SESSION', payload: sessionId });
+  }, []);
+
+  // Sync current agent with the logged-in user (handles login and account switching)
   useEffect(() => {
-    if (state.currentAgentId) return;
-    const raw = localStorage.getItem('currentUser');
-    if (!raw) return;
-    try {
-      const u = JSON.parse(raw);
-      if (u.role === 'agent' && u.username) {
-        dispatch({ type: 'SET_CURRENT_AGENT_ID', payload: u.username });
-      }
-    } catch { /* ignore */ }
-  }, [state.currentAgentId]);
+    const agent = getCurrentAgent();
+    if (agent?.id !== state.currentAgentId || (agent && agent.name !== state.currentAgentName)) {
+      dispatch({ type: 'SET_CURRENT_AGENT_ID', payload: agent });
+    }
+  }, [state.currentAgentId, state.currentAgentName]);
 
   // Request desktop notification permission
   useEffect(() => {
@@ -343,11 +397,16 @@ export function AgentProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'UPDATE_AGENT_SESSIONS', payload: agents });
     };
 
+    const onSessionDeleted = ({ sessionId }: { sessionId: string }) => {
+      dispatch({ type: 'REMOVE_SESSION', payload: sessionId });
+    };
+
     socket.on('session', onSession);
     socket.on('message', onMessage);
     socket.on('typing', onTyping);
     socket.on('message:status', onMessageStatus);
     socket.on('agent:list', onAgentList);
+    socket.on('session:deleted', onSessionDeleted);
 
     // Fetch agents via REST as fallback
     api.getAgents().then((list) => {
@@ -361,6 +420,7 @@ export function AgentProvider({ children }: { children: ReactNode }) {
       socket.off('typing', onTyping);
       socket.off('message:status', onMessageStatus);
       socket.off('agent:list', onAgentList);
+      socket.off('session:deleted', onSessionDeleted);
     };
   }, [state.currentAgentId, state.agentStatus]);
 
@@ -377,7 +437,7 @@ export function AgentProvider({ children }: { children: ReactNode }) {
   }, [state.toasts]);
 
   return (
-    <AgentContext.Provider value={{ state, dispatch, sendMessage }}>
+    <AgentContext.Provider value={{ state, dispatch, sendMessage, deleteSession }}>
       {children}
     </AgentContext.Provider>
   );

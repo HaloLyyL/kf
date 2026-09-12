@@ -34,8 +34,15 @@ export interface AuthResponse {
     username: string;
     displayName: string;
     role: string;
+    avatar?: string | null;
   };
   error?: string;
+}
+
+export interface ProfilePayload {
+  username: string;
+  displayName?: string;
+  avatar?: string | null;
 }
 
 export interface AgentInfo {
@@ -60,4 +67,10 @@ export const api = {
     }),
 
   getAgents: () => request<AgentInfo[]>('/api/agents'),
+
+  updateProfile: (payload: ProfilePayload) =>
+    request<AuthResponse>('/api/agents/profile', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 };

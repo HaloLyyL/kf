@@ -124,7 +124,9 @@ export default function RegisterForm({ onLoginClick }: RegisterFormProps) {
       setSuccess(true)
       setTimeout(() => {
         setSuccess(false)
-        localStorage.setItem('currentUser', JSON.stringify({ username: username.trim(), displayName: displayName.trim(), role }))
+        const currentUser = JSON.stringify({ username: username.trim(), displayName: displayName.trim(), role })
+        sessionStorage.setItem('currentUser', currentUser)
+        localStorage.setItem('currentUser', currentUser)
         if (role === 'agent') {
           navigate('/agent')
         } else {

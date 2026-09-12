@@ -58,7 +58,9 @@ export default function LoginForm({ onRegisterClick }: LoginFormProps) {
     try {
       const res = await api.login({ username: inputUsername.trim(), password: inputPassword })
       const user = res.user!
-      localStorage.setItem(CURRENT_USER_KEY, JSON.stringify({ username: user.username, displayName: user.displayName, role: user.role }))
+      const currentUser = JSON.stringify({ username: user.username, displayName: user.displayName, role: user.role, avatar: user.avatar || null })
+      sessionStorage.setItem(CURRENT_USER_KEY, currentUser)
+      localStorage.setItem(CURRENT_USER_KEY, currentUser)
       if (rememberMe) {
         localStorage.setItem(REMEMBER_KEY, user.username)
       } else {

@@ -3,12 +3,14 @@ import { motion } from 'framer-motion';
 import { Search, PanelLeft } from 'lucide-react';
 import { useAgent } from '../store';
 import StatusDropdown from './StatusDropdown';
+import ProfileModal from './ProfileModal';
 
 const easeOut = [0.16, 1, 0.3, 1] as [number, number, number, number];
 
 export default function TopNav() {
   const { state, dispatch } = useAgent();
   const [searchFocused, setSearchFocused] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
 
   return (
     <motion.header
@@ -55,10 +57,30 @@ export default function TopNav() {
       {/* Right: Status + Agent */}
       <div className="flex items-center gap-3">
         <StatusDropdown />
-        <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#EEF4FF]">
-          <span className="text-sm font-semibold text-[#4F7BF7]">客</span>
-        </div>
+        <button
+          type="button"
+          onClick={() => setIsProfileOpen(true)}
+          className="flex items-center gap-2 rounded-full p-0.5 pr-1 transition-colors hover:bg-gray-100"
+          title="编辑资料"
+        >
+          <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-[#EEF4FF]">
+            {state.currentAgentAvatar ? (
+              <img src={state.currentAgentAvatar} alt="头像" className="h-full w-full object-cover" />
+            ) : (
+              <span className="text-sm font-semibold text-[#4F7BF7]">
+                {(state.currentAgentName || state.currentAgentId || '客').slice(0, 1)}
+              </span>
+            )}
+          </div>
+          {(state.currentAgentName || state.currentAgentId) && (
+            <span className="hidden text-sm font-medium text-gray-700 sm:block">
+              {state.currentAgentName || state.currentAgentId}
+            </span>
+          )}
+        </button>
       </div>
+
+      <ProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
     </motion.header>
   );
 }

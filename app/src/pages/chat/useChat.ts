@@ -10,19 +10,19 @@ function getQueryParams(search: string) {
   const params = new URLSearchParams(search)
   return {
     userId: params.get('userId') || 'demo-user',
-    agentId: params.get('agentId') || 'agent-001',
+    agentId: params.get('agentId'),
   }
 }
 
 export function useChat() {
   const location = useLocation()
-  const { userId: queryUserId, agentId: initialAgentId } = getQueryParams(location.search)
-  const hasQueryParams = location.search.includes('userId=') && location.search.includes('agentId=')
-  const isDemo = !hasQueryParams
+  const { userId: queryUserId, agentId: queryAgentId } = getQueryParams(location.search)
+  // Demo mode only when no userId given; agentId is optional (server auto-assigns one)
+  const isDemo = !location.search.includes('userId=')
 
   const userId = queryUserId
 
-  const [currentAgentId, setCurrentAgentId] = useState(initialAgentId)
+  const [currentAgentId, setCurrentAgentId] = useState<string | null>(queryAgentId)
   const [isTyping, setIsTyping] = useState(false)
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
   const [sessions, setSessions] = useState<Session[]>([])
@@ -81,7 +81,13 @@ export function useChat() {
         }
         return [session, ...prev]
       })
-      if (session.userId === userId && session.agentId === currentAgentId && session.status === 'active') {
+      if (session.userId !== userId || session.status !== 'active') return
+      // Server may auto-assign an agent when none was specified in the URL
+      if (!queryAgentId && session.agentId !== currentAgentId) {
+        setCurrentAgentId(session.agentId)
+        return
+      }
+      if (session.agentId === currentAgentId) {
         setCurrentSessionId(session.id)
         // Flush pending message if any
         if (pendingMessageRef.current) {
@@ -119,10 +125,16 @@ export function useChat() {
       setAgents(agentList)
     }
 
+    const onSessionDeleted = ({ sessionId }: { sessionId: string }) => {
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId))
+      setCurrentSessionId((prev) => (prev === sessionId ? null : prev))
+    }
+
     socket.on('session', onSession)
     socket.on('message', onMessage)
     socket.on('typing', onTyping)
     socket.on('agent:list', onAgentList)
+    socket.on('session:deleted', onSessionDeleted)
 
     // Fetch agents via REST as fallback
     api.getAgents().then((list) => {
@@ -134,6 +146,7 @@ export function useChat() {
       socket.off('message', onMessage)
       socket.off('typing', onTyping)
       socket.off('agent:list', onAgentList)
+      socket.off('session:deleted', onSessionDeleted)
     }
   }, [userId, currentAgentId])
 
@@ -154,8 +167,8 @@ export function useChat() {
   const currentAgent =
     agents.find((a) => a.id === currentAgentId) ||
     agents[0] || {
-      id: currentAgentId,
-      name: currentAgentId,
+      id: currentAgentId || '',
+      name: currentAgentId || '客服',
       avatar: '/avatar-placeholder.png',
       status: 'online',
       lastMessage: '',
