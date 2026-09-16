@@ -87,6 +87,12 @@ function runTurnstile(): Promise<string> {
     () =>
       new Promise<string>((resolve, reject) => {
         const el = document.createElement('div')
+        // 居中显示验证框（默认会出现在文档流底部角落）
+        el.style.position = 'fixed'
+        el.style.left = '50%'
+        el.style.top = '50%'
+        el.style.transform = 'translate(-50%, -50%)'
+        el.style.zIndex = '99999'
         document.body.appendChild(el)
         let settled = false
         const cleanup = () => {

@@ -148,6 +148,9 @@ async function verifyTurnstile(turnstileToken, ip) {
       body: JSON.stringify({ secret: TURNSTILE_SECRET, response: turnstileToken, remoteip: ip }),
     });
     const data = await res.json();
+    if (data.success !== true) {
+      console.error('[turnstile] verify failed:', JSON.stringify(data));
+    }
     return data.success === true;
   } catch (e) {
     console.error('Turnstile verify failed:', e.message);
@@ -296,6 +299,7 @@ app.use(express.json({ limit: '10mb' }));
 // Requires a Turnstile token when TURNSTILE_SECRET_KEY is configured.
 app.post('/api/visitor/token', async (req, res) => {
   const ip = getClientIp(req);
+  console.log('[visitor/token] request from', ip, 'turnstileToken?', !!(req.body && req.body.turnstileToken));
   if (!tokenLimiter.allow(ip)) {
     return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
   }
@@ -407,6 +411,7 @@ io.on('connection', (socket) => {
   // User joins chat — requires a valid signed visitor token
   socket.on('user:join', ({ token, userName, agentId }) => {
     const payload = verifyVisitorToken(token);
+    console.log('[user:join] token valid?', !!payload, 'agentId?', agentId || '(auto)');
     if (!payload) {
       socket.emit('error', { code: 'visitor_auth', message: '访客验证已失效，请刷新页面重试' });
       return;

@@ -2,7 +2,7 @@ import { io } from 'socket.io-client';
 
 const host = window.location.hostname;
 
-export const socket = io(`http://${host}:3002`, {
+export const socket = io(`http://${host}:3003`, {
   transports: ['websocket', 'polling'],
   autoConnect: true,
   reconnection: true,

@@ -2,3 +2,6 @@ node_modules/
 dist/
 .DS_Store
 server/data/secret.key
+ecosystem.config.js
+.env
+app/.env
