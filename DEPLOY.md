@@ -256,6 +256,49 @@ Certbot 会自动修改 Nginx 配置，添加 443 端口和证书路径。
 
 ---
 
+## 访客安全与人机验证（Turnstile）
+
+访客无需注册/登录即可聊天，但发起会话前必须通过以下门槛：
+
+1. **访客签名令牌**：前端先调用 `POST /api/visitor/token` 获取服务端 HMAC 签名的访客令牌（7 天有效），Socket 的 `user:join` 必须携带该令牌，否则拒绝创建会话。
+2. **Cloudflare Turnstile 人机验证**（生产环境建议开启）：令牌签发前强制校验，防止脚本批量刷会话。
+3. **限流**：每个 IP 每小时最多 30 个访客令牌 / 20 个新会话；每个连接每分钟最多 30 条消息。
+
+### 开启 Turnstile（生产环境必做）
+
+1. 到 [Cloudflare Turnstile](https://www.cloudflare.com/products/turnstile/) 免费创建站点，拿到 **Site Key** 和 **Secret Key**。
+
+2. **前端构建时**注入 Site Key（在 `app/` 目录创建 `.env` 文件）：
+
+   ```bash
+   # app/.env
+   VITE_TURNSTILE_SITE_KEY=0x4AAAAAAAxxxxxxxx
+   ```
+
+   然后重新 `npm run build`。
+
+3. **后端启动时**配置 Secret Key 环境变量：
+
+   ```bash
+   TURNSTILE_SECRET_KEY=0x4AAAAAAAyyyyyyyy node index.js
+   ```
+
+   或在 `ecosystem.config.js` 的 `env` 中添加。
+
+> 未配置 `TURNSTILE_SECRET_KEY` 时为开发模式：跳过人机验证，仍要求访客令牌和限流。
+
+### 环境变量一览
+
+| 变量 | 作用 | 默认值 |
+|------|------|--------|
+| `PORT` | 后端监听端口 | `3002` |
+| `TURNSTILE_SECRET_KEY` | Turnstile 服务端密钥，配置后强制人机验证 | 空（跳过验证） |
+| `ALLOWED_ORIGINS` | 允许跨域的来源，逗号分隔；生产环境建议设置为你的域名 | 空（允许全部，开发模式） |
+
+> 签名密钥自动生成并保存在 `server/data/secret.key`，删除后所有已签发的访客令牌失效。
+
+---
+
 ## 数据持久化
 
 后端使用 `server/data/` 目录存储用户和会话数据：

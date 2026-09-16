@@ -46,6 +46,7 @@ export default function Chat() {
     messages,
     isTyping,
     connectionStatus,
+    authError,
     sendMessage,
     switchAgent,
   } = useChat()
@@ -77,7 +78,7 @@ export default function Chat() {
     setShowAgentList(false)
   }, [location.search])
 
-  const isInputDisabled = connectionStatus === 'disconnected'
+  const isInputDisabled = connectionStatus === 'disconnected' || !!authError
 
   return (
     <div className="flex h-[100dvh] w-full bg-[#F3F4F6]">
@@ -116,6 +117,13 @@ export default function Chat() {
         >
           {/* Demo banner */}
           {isDemo && <DemoBanner userId={userId} agentId={currentAgent.id} />}
+
+          {/* Visitor verification error */}
+          {authError && (
+            <div className="flex-shrink-0 bg-[#FEF2F2] px-4 py-2 text-center text-xs text-[#DC2626]">
+              {authError}
+            </div>
+          )}
 
           {/* Chat Header */}
           <ChatHeader

@@ -10,6 +10,17 @@ const PORT = process.env.PORT || 3002;
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+const SECRET_FILE = path.join(DATA_DIR, 'secret.key');
+
+// Security config (env)
+// TURNSTILE_SECRET_KEY: Cloudflare Turnstile secret; empty = dev mode (skip captcha)
+// ALLOWED_ORIGINS: comma-separated allowed origins for CORS; empty = allow all (dev)
+const TURNSTILE_SECRET = process.env.TURNSTILE_SECRET_KEY || '';
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const VISITOR_TOKEN_TTL = 7 * 24 * 3600 * 1000; // 7 days
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -80,6 +91,116 @@ function scheduleSave() {
 
 function generateId() {
   return crypto.randomUUID();
+}
+
+// ===== Visitor security: signed tokens, Turnstile, rate limiting =====
+
+// Persisted server secret so visitor tokens survive restarts
+function loadSecret() {
+  try {
+    if (fs.existsSync(SECRET_FILE)) {
+      const s = fs.readFileSync(SECRET_FILE, 'utf-8').trim();
+      if (s) return s;
+    }
+  } catch (e) {
+    console.error('Failed to read secret:', e.message);
+  }
+  const s = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(SECRET_FILE, s, { mode: 0o600 });
+  } catch (e) {
+    console.error('Failed to persist secret:', e.message);
+  }
+  return s;
+}
+const SERVER_SECRET = loadSecret();
+
+function signVisitorToken(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SERVER_SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+function verifyVisitorToken(token) {
+  if (typeof token !== 'string') return null;
+  const dot = token.indexOf('.');
+  if (dot <= 0) return null;
+  const body = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', SERVER_SECRET).update(body).digest('base64url');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf-8'));
+    if (!payload.vid || typeof payload.exp !== 'number' || Date.now() > payload.exp) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function verifyTurnstile(turnstileToken, ip) {
+  try {
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret: TURNSTILE_SECRET, response: turnstileToken, remoteip: ip }),
+    });
+    const data = await res.json();
+    return data.success === true;
+  } catch (e) {
+    console.error('Turnstile verify failed:', e.message);
+    return false;
+  }
+}
+
+// Simple in-memory sliding-window rate limiter
+function createRateLimiter({ windowMs, max }) {
+  const hits = new Map(); // key -> timestamps
+  return {
+    allow(key) {
+      const now = Date.now();
+      const arr = (hits.get(key) || []).filter((t) => now - t < windowMs);
+      if (arr.length >= max) {
+        hits.set(key, arr);
+        return false;
+      }
+      arr.push(now);
+      hits.set(key, arr);
+      return true;
+    },
+    sweep() {
+      const now = Date.now();
+      for (const [key, arr] of hits) {
+        const kept = arr.filter((t) => now - t < windowMs);
+        if (kept.length === 0) hits.delete(key);
+        else hits.set(key, kept);
+      }
+    },
+  };
+}
+
+const tokenLimiter = createRateLimiter({ windowMs: 3600e3, max: 30 }); // 30 tokens / hour / IP
+const sessionLimiter = createRateLimiter({ windowMs: 3600e3, max: 20 }); // 20 new sessions / hour / IP
+const messageLimiter = createRateLimiter({ windowMs: 60e3, max: 30 }); // 30 messages / minute / socket
+
+setInterval(() => {
+  tokenLimiter.sweep();
+  sessionLimiter.sweep();
+  messageLimiter.sweep();
+}, 3600e3).unref();
+
+function getClientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd) return fwd.split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
+
+function getSocketIp(socket) {
+  const fwd = socket.handshake.headers['x-forwarded-for'];
+  if (typeof fwd === 'string' && fwd) return fwd.split(',')[0].trim();
+  return socket.handshake.address || 'unknown';
 }
 
 function getAgentAvatar(username) {
@@ -167,10 +288,31 @@ function broadcastAgentList() {
 
 // Express setup
 const app = express();
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors({ origin: ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : true, credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 
 // REST API
+// Issue a signed visitor token (anonymous but verifiable identity).
+// Requires a Turnstile token when TURNSTILE_SECRET_KEY is configured.
+app.post('/api/visitor/token', async (req, res) => {
+  const ip = getClientIp(req);
+  if (!tokenLimiter.allow(ip)) {
+    return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
+  }
+  if (TURNSTILE_SECRET) {
+    const { turnstileToken } = req.body || {};
+    if (!turnstileToken) {
+      return res.status(400).json({ error: '缺少人机验证凭证' });
+    }
+    const ok = await verifyTurnstile(turnstileToken, ip);
+    if (!ok) {
+      return res.status(403).json({ error: '人机验证失败，请刷新后重试' });
+    }
+  }
+  const now = Date.now();
+  const token = signVisitorToken({ vid: `v-${generateId()}`, iat: now, exp: now + VISITOR_TOKEN_TTL });
+  res.json({ success: true, token, expiresAt: now + VISITOR_TOKEN_TTL });
+});
 app.post('/api/auth/register', (req, res) => {
   const { username, displayName, password, role } = req.body;
   if (!username || !password) {
@@ -255,21 +397,37 @@ app.get('*', (req, res) => {
 // Socket.IO setup
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: { origin: ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : '*', methods: ['GET', 'POST'] },
   transports: ['websocket', 'polling'],
 });
 
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
 
-  // User joins chat (demo mode or logged-in user)
-  socket.on('user:join', ({ userId, userName, agentId }) => {
-    const uid = userId || `guest-${socket.id.slice(0, 6)}`;
+  // User joins chat — requires a valid signed visitor token
+  socket.on('user:join', ({ token, userName, agentId }) => {
+    const payload = verifyVisitorToken(token);
+    if (!payload) {
+      socket.emit('error', { code: 'visitor_auth', message: '访客验证已失效，请刷新页面重试' });
+      return;
+    }
+    const uid = payload.vid;
+    const targetAgent = agentId || pickDefaultAgent();
+
+    // Rate-limit creation of NEW sessions per IP
+    const hasActive = sessions.some(
+      (s) => s.userId === uid && s.agentId === targetAgent && s.status === 'active'
+    );
+    if (!hasActive && !sessionLimiter.allow(getSocketIp(socket))) {
+      socket.emit('error', { code: 'rate_limit', message: '会话创建过于频繁，请稍后再试' });
+      return;
+    }
+
     userSockets.set(uid, socket);
     socket.userId = uid;
     socket.userRole = 'user';
 
-    const session = createSession(uid, userName, agentId || pickDefaultAgent());
+    const session = createSession(uid, userName, targetAgent);
     socket.join(`session:${session.id}`);
 
     // If agent is online, join them to the session room too
@@ -313,6 +471,12 @@ io.on('connection', (socket) => {
   socket.on('user:message', ({ sessionId, content, type }) => {
     const session = sessions.find((s) => s.id === sessionId);
     if (!session || session.status !== 'active') return;
+    // Only the visitor who owns this session may send messages to it
+    if (socket.userRole !== 'user' || socket.userId !== session.userId) return;
+    if (!messageLimiter.allow(socket.id)) return;
+    if (typeof content !== 'string') return;
+    const maxLen = type === 'image' ? 3 * 1024 * 1024 : 2000;
+    if (content.length > maxLen) return;
 
     const message = {
       id: generateId(),
@@ -340,6 +504,8 @@ io.on('connection', (socket) => {
   socket.on('agent:message', ({ sessionId, content, type }) => {
     const session = sessions.find((s) => s.id === sessionId);
     if (!session || session.status !== 'active') return;
+    // Only the agent assigned to this session may reply
+    if (socket.userRole !== 'agent' || socket.agentId !== session.agentId) return;
 
     const message = {
       id: generateId(),
@@ -363,10 +529,18 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Check the socket actually participates in the session
+  function isSessionParticipant(socket, session) {
+    return (
+      (socket.userRole === 'user' && socket.userId === session.userId) ||
+      (socket.userRole === 'agent' && socket.agentId === session.agentId)
+    );
+  }
+
   // Typing indicator
   socket.on('typing', ({ sessionId, isTyping }) => {
     const session = sessions.find((s) => s.id === sessionId);
-    if (!session) return;
+    if (!session || !isSessionParticipant(socket, session)) return;
     session.isTyping = isTyping;
     socket.to(`session:${sessionId}`).emit('typing', { sessionId, isTyping });
   });
@@ -374,7 +548,7 @@ io.on('connection', (socket) => {
   // Mark message as read
   socket.on('message:read', ({ sessionId, messageId }) => {
     const session = sessions.find((s) => s.id === sessionId);
-    if (!session) return;
+    if (!session || !isSessionParticipant(socket, session)) return;
     const msg = session.messages.find((m) => m.id === messageId);
     if (msg) {
       msg.status = 'read';
@@ -390,7 +564,7 @@ io.on('connection', (socket) => {
   // End session
   socket.on('session:end', ({ sessionId }) => {
     const session = sessions.find((s) => s.id === sessionId);
-    if (!session) return;
+    if (!session || !isSessionParticipant(socket, session)) return;
     session.status = 'ended';
     const sysMsg = createSystemMessage('会话已结束');
     session.messages.push(sysMsg);
