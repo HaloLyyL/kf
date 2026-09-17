@@ -10,22 +10,24 @@ import type { Session } from '../agent/types'
 function getQueryParams(search: string) {
   const params = new URLSearchParams(search)
   return {
-    userId: params.get('userId') || 'demo-user',
+    id: params.get('id'),
     agentId: params.get('agentId'),
   }
 }
 
 export function useChat() {
   const location = useLocation()
-  const { userId: queryUserId, agentId: queryAgentId } = getQueryParams(location.search)
-  // Demo mode only when no userId given; agentId is optional (server auto-assigns one)
-  const isDemo = !location.search.includes('userId=')
+  const { id: queryId, agentId: queryAgentId } = getQueryParams(location.search)
+  // Demo mode only when no id given; agentId is optional (server auto-assigns one)
+  const isDemo = !location.search.includes('id=')
 
   // Anonymous-but-verified visitor identity issued by the server
   const [visitorToken, setVisitorToken] = useState<string | null>(null)
   const [authError, setAuthError] = useState<string | null>(null)
-  // Server derives the userId from the signed token; use it for local filtering
-  const userId = (visitorToken && vidFromToken(visitorToken)) || queryUserId
+  // Server derives the userId from the signed token (which embeds the URL id when given)
+  const userId = (visitorToken && vidFromToken(visitorToken)) || queryId || 'demo-user'
+  // Name the session with the id when provided
+  const userName = queryId || `用户_${userId.slice(-4)}`
 
   const [currentAgentId, setCurrentAgentId] = useState<string | null>(queryAgentId)
   const [isTyping, setIsTyping] = useState(false)
@@ -38,7 +40,7 @@ export function useChat() {
   // Acquire a visitor token before chatting (runs Turnstile when configured)
   useEffect(() => {
     let cancelled = false
-    ensureVisitorToken()
+    ensureVisitorToken(queryId || undefined)
       .then((token) => {
         if (!cancelled) setVisitorToken(token)
       })
@@ -48,14 +50,14 @@ export function useChat() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [queryId])
 
   const refreshVisitorToken = useCallback(() => {
     clearVisitorToken()
-    ensureVisitorToken(true)
+    ensureVisitorToken(queryId || undefined, true)
       .then((token) => setVisitorToken(token))
       .catch((err) => setAuthError(err?.message || '访客验证失败，请刷新重试'))
-  }, [])
+  }, [queryId])
 
   // Sync connection status with socket
   useEffect(() => {
@@ -65,7 +67,7 @@ export function useChat() {
       if (visitorToken) {
         socket.emit('user:join', {
           token: visitorToken,
-          userName: `用户_${userId.slice(-4)}`,
+          userName,
           agentId: currentAgentId,
         })
       }
@@ -98,7 +100,7 @@ export function useChat() {
 
     socket.emit('user:join', {
       token: visitorToken,
-      userName: `用户_${userId.slice(-4)}`,
+      userName,
       agentId: currentAgentId,
     })
 
@@ -223,7 +225,7 @@ export function useChat() {
       if (!visitorToken) return
       if (!currentSessionId) {
         pendingMessageRef.current = { content, type }
-        socket.emit('user:join', { token: visitorToken, userName: `用户_${userId.slice(-4)}`, agentId: currentAgentId })
+        socket.emit('user:join', { token: visitorToken, userName, agentId: currentAgentId })
         return
       }
       socket.emit('user:message', { sessionId: currentSessionId, content, type })

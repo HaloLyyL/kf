@@ -124,17 +124,18 @@ function runTurnstile(): Promise<string> {
 
 let pending: Promise<string> | null = null
 
-export function ensureVisitorToken(forceRefresh = false): Promise<string> {
+export function ensureVisitorToken(id?: string, forceRefresh = false): Promise<string> {
   if (!forceRefresh) {
     const cached = readCache()
-    if (cached) return Promise.resolve(cached.token)
+    // A cached token is only reusable for the same requested id
+    if (cached && (!id || vidFromToken(cached.token) === id)) return Promise.resolve(cached.token)
   } else {
     clearVisitorToken()
   }
   if (pending) return pending
   pending = (async () => {
     const turnstileToken = SITE_KEY ? await runTurnstile() : ''
-    const res = await api.getVisitorToken(turnstileToken)
+    const res = await api.getVisitorToken(turnstileToken, id)
     const cached: CachedToken = { token: res.token, expiresAt: res.expiresAt }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(cached))
     return res.token

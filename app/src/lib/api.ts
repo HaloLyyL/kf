@@ -54,10 +54,10 @@ export interface AgentInfo {
 }
 
 export const api = {
-  getVisitorToken: (turnstileToken?: string) =>
+  getVisitorToken: (turnstileToken?: string, id?: string) =>
     request<{ success: boolean; token: string; expiresAt: number }>('/api/visitor/token', {
       method: 'POST',
-      body: JSON.stringify({ turnstileToken }),
+      body: JSON.stringify({ turnstileToken, id }),
     }),
 
   register: (payload: RegisterPayload) =>

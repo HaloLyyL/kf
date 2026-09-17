@@ -314,7 +314,10 @@ app.post('/api/visitor/token', async (req, res) => {
     }
   }
   const now = Date.now();
-  const token = signVisitorToken({ vid: `v-${generateId()}`, iat: now, exp: now + VISITOR_TOKEN_TTL });
+  // Use the client-supplied id as the visitor identity when it looks sane
+  const rawId = req.body && typeof req.body.id === 'string' ? req.body.id.trim() : '';
+  const vid = /^[^\s]{1,64}$/.test(rawId) ? rawId : `v-${generateId()}`;
+  const token = signVisitorToken({ vid, iat: now, exp: now + VISITOR_TOKEN_TTL });
   res.json({ success: true, token, expiresAt: now + VISITOR_TOKEN_TTL });
 });
 app.post('/api/auth/register', (req, res) => {
